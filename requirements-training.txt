@@ -1,0 +1,7 @@
+# Optional fine-tuning dependencies. Use a GPU/ROCm environment appropriate
+# for your platform; do not install this file for normal verifier or GUI use.
+-r requirements.txt
+datasets>=2.19,<4
+scikit-learn>=1.4,<2
+trl>=0.12,<1
+# Install Unsloth according to its platform-specific instructions.

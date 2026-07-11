@@ -1,0 +1,35 @@
+* 12V to 5V Buck (LTC3630A) to 3.3V LDO (ADP7185) Power Chain
+*
+* Subsystem Description:
+* An LTC3630A buck regulator converts 12V to 5V.
+* The 5V rail powers an ADP7185 LDO which generates the final output rail.
+* NOTE: The provided ADP7185 is a negative LDO and will not produce a positive 3.3V
+* output from a positive 5V input as specified in the request. The netlist
+* reflects the requested connections using the provided IC models.
+
+* --- Global Input ---
+V_IN V_12V 0 12
+
+* --- Buck Regulator Stage (12V to 5V) ---
+XU_BUCK BUCK_SW MP_01 V_12V MP_02 BUCK_RUN 0 BUCK_INTVCC 0 BUCK_FB BUCK_INTVCC NC_03 NC_04 LTC3630
+L_BUCK BUCK_SW V_5V 22u Rser=50m
+C_BUCK_OUT V_5V 0 22u Rser=0.003 Lser=0 ; mfg="TDK" pn="C575OX5RIE226M" type="X5R"
+R_FB1 V_5V BUCK_FB 200K
+R_FB2 BUCK_FB 0 147K
+R_LOAD_5V V_5V 0 24
+
+* --- LDO Regulator Stage (5V to 3.3V) ---
+XU_LDO V_3V3 V_3V3 LDO_NR LDO_SS V_5V 0 LDO_UVLO V_5V ADP7185
+C_LDO_IN V_5V 0 10u Rser=5m
+C_LDO_OUT V_3V3 0 4.7u Rser=5m
+C_LDO_NRSS LDO_NR LDO_SS 10n
+C_LDO_NR LDO_NR 0 1u
+C_LDO_UVLO LDO_UVLO 0 1u
+R_LOAD_3V3 V_3V3 0 2
+
+* --- Analysis and Libraries ---
+.lib LTC3630.sub
+.lib ADP7185.sub
+.tran 200m startup
+.end
+

@@ -1,0 +1,2 @@
+# The released LoRA adapter is the only large runtime artifact tracked through Git LFS.
+models/gemma3-lora/adapter_model.safetensors filter=lfs diff=lfs merge=lfs -text

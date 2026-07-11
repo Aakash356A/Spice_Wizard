@@ -1,0 +1,9 @@
+* LT1054 Inverter Circuit
+V1 IN 0 10V
+Cfly 2 4 100u
+Cout 0 5 100u
+Rload 5 0 50
+XU1 0 2 0 4 5 0 0 IN LT1054
+.lib LT1054.sub
+.tran 10m startup
+.end

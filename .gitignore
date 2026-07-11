@@ -1,0 +1,58 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python environments, caches, and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.claude/
+.conda/
+.DS_Store
+Thumbs.db
+
+# LTspice and GUI-generated artifacts
+*.raw
+*.op.raw
+*.log
+*.plt
+*_edited_*.cir
+outputs/
+outputs_archive/
+tmp/
+temp/
+
+# Generated datasets and local training state
+training/datasets/
+training/runs/
+training/checkpoints/
+training/unsloth_compiled_cache/
+training/offload/
+
+# Checkpoints and duplicated training-resume artifacts.
+# The single published runtime adapter remains tracked through Git LFS.
+models/**/checkpoint-*/
+models/**/*.pt
+models/**/*.pth
+models/**/optimizer.*
+models/**/scheduler.*
+models/**/rng_state.*
+models/**/trainer_state.*
+models/**/training_args.*
+
+# Keep curated source templates, but never commit generated non-.net data files.
+data/**/*.raw
+data/**/*.op.raw
+data/**/*.log
+data/**/*.cir
+data/generated/
