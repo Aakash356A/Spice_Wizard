@@ -23,7 +23,7 @@ flowchart LR
 
 | What | Where | Status |
 |---|---|---|
-| Netlist generation & adaptation — Qwen2.5-Coder (open weights) | **AMD Instinct MI300X**, PyTorch on **ROCm**, fp16 | ✅ working |
+| Netlist generation & adaptation — Qwen3 (open weights) | **AMD Instinct MI300X**, PyTorch on **ROCm**, fp16 | ✅ working |
 | Live OpenAI-compatible endpoint served from the MI300X | [notebooks/amd_serve_and_tunnel.ipynb](notebooks/amd_serve_and_tunnel.ipynb) — token-protected FastAPI + HTTPS/443 tunnel | ✅ working |
 | MI300X inference proof (`rocm-smi` under load) | [notebooks/amd_mi300x_demo.ipynb](notebooks/amd_mi300x_demo.ipynb) | ✅ working |
 | Manual best-of-N handoff (works even without a tunnel) | [docs/AMD_DEPLOYMENT.md](docs/AMD_DEPLOYMENT.md) + Candidate Arena | ✅ working |
