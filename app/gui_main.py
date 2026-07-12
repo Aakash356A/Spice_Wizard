@@ -67,12 +67,15 @@ class SPICEEditorGUI:
         local_agent_enabled = os.getenv("SPICE_WIZARD_ENABLE_LOCAL_AGENT", "").lower() in {
             "1", "true", "yes", "on"
         }
+        api_configured = bool(os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY"))
         if UnifiedAgent is None:
             self.agent_error = "Agent dependencies are unavailable. Install requirements.txt."
-        elif not local_agent_enabled:
+        elif not (local_agent_enabled or api_configured):
             self.agent_error = (
-                "Local Gemma is disabled by default. Set SPICE_WIZARD_ENABLE_LOCAL_AGENT=1 "
-                "after running `git lfs pull` and preparing the compatible base model."
+                "No LLM backend configured. In .env set LLM_BASE_URL + LLM_API_KEY "
+                "(AMD MI300X endpoint — see notebooks/amd_serve_and_tunnel.ipynb) or "
+                "OPENROUTER_API_KEY. Optionally set SPICE_WIZARD_ENABLE_LOCAL_AGENT=1 "
+                "for the local Gemma specialist after `git lfs pull`."
             )
         else:
             try:
@@ -98,6 +101,20 @@ class SPICEEditorGUI:
 
         # Verify Spec feature state (Use Case 1: sim_harness.run_spice + spec_report.report)
         self.verify_metrics: list[dict] = []  # [{'name','target','tol','direction'}]
+
+        # Candidate Arena state: multiple untrusted model outputs compete under
+        # the same template invariants and LTspice measurement conditions.
+        self.arena_candidates: list[dict[str, str]] = []
+        self.arena_outcomes = []
+        self.arena_outcome_items: dict[str, object] = {}
+        self.arena_context: dict | None = None
+        self.arena_candidate_listbox = None
+        self.arena_results_tree = None
+        self.arena_source_combo = None
+        self.arena_status_label = None
+        self.arena_run_btn = None
+        self.arena_load_btn = None
+        self.arena_export_btn = None
 
         self._create_widgets()
         self._check_dependencies()
@@ -503,6 +520,375 @@ class SPICEEditorGUI:
         self.verify_results_tree.column("Status", width=70)
         self.verify_results_tree.column("Margin", width=90)
         self.verify_results_tree.pack(fill=tk.BOTH, expand=True)
+
+        # --- Best-of-N candidate arena ---
+        arena_frame = ttk.LabelFrame(
+            verify_tab,
+            text="Candidate Arena — Best-of-N Verification",
+            padding="5",
+        )
+        arena_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        ttk.Label(
+            arena_frame,
+            text=(
+                "Import multiple AMD/local LLM responses. Each candidate must preserve the current "
+                "editor template, then LTspice ranks it by measured specifications."
+            ),
+            wraplength=720,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        candidates_frame = ttk.Frame(arena_frame)
+        candidates_frame.pack(fill=tk.X, pady=2)
+        self.arena_candidate_listbox = tk.Listbox(candidates_frame, height=4, selectmode=tk.BROWSE)
+        self.arena_candidate_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        candidate_buttons = ttk.Frame(candidates_frame)
+        candidate_buttons.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(candidate_buttons, text="Add Candidate Files...", command=self._arena_add_candidates).pack(fill=tk.X)
+        ttk.Button(candidate_buttons, text="Remove Selected", command=self._arena_remove_selected).pack(fill=tk.X, pady=2)
+        ttk.Button(candidate_buttons, text="Clear", command=self._arena_clear_candidates).pack(fill=tk.X)
+
+        arena_controls = ttk.Frame(arena_frame)
+        arena_controls.pack(fill=tk.X, pady=(4, 2))
+        ttk.Label(arena_controls, text="Candidate source:").pack(side=tk.LEFT)
+        self.arena_source_combo = ttk.Combobox(
+            arena_controls,
+            values=["amd_mi300x_manual", "local_fine_tune", "openai_compatible", "other"],
+            state="readonly",
+            width=22,
+        )
+        self.arena_source_combo.pack(side=tk.LEFT, padx=(4, 10))
+        self.arena_source_combo.set("amd_mi300x_manual")
+        self.arena_run_btn = ttk.Button(
+            arena_controls,
+            text="Run Candidate Arena",
+            command=self._arena_run,
+            state="disabled",
+        )
+        self.arena_run_btn.pack(side=tk.LEFT)
+        self.arena_load_btn = ttk.Button(
+            arena_controls,
+            text="Load Selected Candidate",
+            command=self._arena_load_selected,
+            state="disabled",
+        )
+        self.arena_load_btn.pack(side=tk.LEFT, padx=4)
+        self.arena_export_btn = ttk.Button(
+            arena_controls,
+            text="Export Evidence...",
+            command=self._arena_export_evidence,
+            state="disabled",
+        )
+        self.arena_export_btn.pack(side=tk.LEFT)
+        self.arena_status_label = ttk.Label(arena_frame, text="Add candidates to begin", foreground="gray")
+        self.arena_status_label.pack(fill=tk.X, pady=2)
+
+        self.arena_results_tree = ttk.Treeview(
+            arena_frame,
+            columns=("Source", "Outcome", "Metrics", "Score", "Time"),
+            show="tree headings",
+            selectmode="browse",
+            height=5,
+        )
+        self.arena_results_tree.heading("#0", text="Candidate")
+        self.arena_results_tree.heading("Source", text="Source")
+        self.arena_results_tree.heading("Outcome", text="Outcome")
+        self.arena_results_tree.heading("Metrics", text="Metrics")
+        self.arena_results_tree.heading("Score", text="Quality")
+        self.arena_results_tree.heading("Time", text="Time")
+        self.arena_results_tree.column("#0", width=180)
+        self.arena_results_tree.column("Source", width=130)
+        self.arena_results_tree.column("Outcome", width=110)
+        self.arena_results_tree.column("Metrics", width=85)
+        self.arena_results_tree.column("Score", width=80)
+        self.arena_results_tree.column("Time", width=70)
+        self.arena_results_tree.tag_configure("pass", foreground="green")
+        self.arena_results_tree.tag_configure("fail", foreground="red")
+        self.arena_results_tree.tag_configure("rejected", foreground="#a06000")
+        self.arena_results_tree.pack(fill=tk.BOTH, expand=True)
+
+    def _arena_refresh_candidates(self):
+        """Refresh the candidate list and action availability."""
+        if not self.arena_candidate_listbox:
+            return
+        self.arena_candidate_listbox.delete(0, tk.END)
+        for candidate in self.arena_candidates:
+            self.arena_candidate_listbox.insert(tk.END, candidate["label"])
+        if self.arena_candidates:
+            self.arena_status_label.config(
+                text=f"{len(self.arena_candidates)} candidate(s) ready for LTspice verification",
+                foreground="blue",
+            )
+            self.arena_run_btn.config(state="normal")
+        else:
+            self.arena_status_label.config(text="Add candidates to begin", foreground="gray")
+            self.arena_run_btn.config(state="disabled")
+
+    def _arena_add_candidates(self):
+        """Import complete LLM responses or raw netlists into the arena."""
+        paths = filedialog.askopenfilenames(
+            title="Add Candidate Netlists or LLM Responses",
+            filetypes=[
+                ("Candidate files", "*.txt *.net *.cir *.sp *.spice"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not paths:
+            return
+
+        existing_labels = {candidate["label"] for candidate in self.arena_candidates}
+        for raw_path in paths:
+            path = Path(raw_path)
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError as error:
+                messagebox.showerror("Candidate Import Error", f"Could not read {path.name}:\n{error}")
+                continue
+            if not text.strip():
+                messagebox.showwarning("Candidate Import", f"Skipped empty file: {path.name}")
+                continue
+            label = path.name
+            suffix = 2
+            while label in existing_labels:
+                label = f"{path.stem} ({suffix}){path.suffix}"
+                suffix += 1
+            existing_labels.add(label)
+            self.arena_candidates.append({"label": label, "text": text})
+        self._arena_refresh_candidates()
+
+    def _arena_remove_selected(self):
+        if not self.arena_candidate_listbox:
+            return
+        selection = self.arena_candidate_listbox.curselection()
+        if not selection:
+            return
+        self.arena_candidates.pop(selection[0])
+        self._arena_refresh_candidates()
+
+    def _arena_clear_candidates(self):
+        self.arena_candidates.clear()
+        self._arena_refresh_candidates()
+
+    def _arena_run(self):
+        """Run all imported candidates under one immutable template/spec context."""
+        if not self.model:
+            messagebox.showwarning("Candidate Arena", "Load the trusted template into the editor first.")
+            return
+        if not self.arena_candidates:
+            messagebox.showwarning("Candidate Arena", "Add one or more candidate files first.")
+            return
+        if not self.verify_metrics:
+            messagebox.showwarning("Candidate Arena", "Add at least one target metric first.")
+            return
+        if not self.sim_runner.is_available():
+            messagebox.showerror("Candidate Arena", "LTspice not found.")
+            return
+
+        try:
+            freq_hz = float(self.verify_freq_entry.get().strip() or "1000")
+        except ValueError:
+            messagebox.showerror("Candidate Arena", "Freq must be a number.")
+            return
+        if not math.isfinite(freq_hz) or freq_hz <= 0:
+            messagebox.showerror("Candidate Arena", "Freq must be a finite number greater than zero.")
+            return
+
+        template_netlist = "\n".join(self.model.lines)
+        candidate_snapshot = [dict(candidate) for candidate in self.arena_candidates]
+        metrics_snapshot = [dict(metric) for metric in self.verify_metrics]
+        in_node = self.verify_in_node_entry.get().strip() or "IN"
+        out_node = self.verify_out_node_entry.get().strip() or "OUT"
+        source = self.arena_source_combo.get() or "manual_candidate"
+        template_label = self.netlist_path.name if self.netlist_path else "editor_template"
+        template_id = self.netlist_path.stem if self.netlist_path else "GUI_TEMPLATE"
+        spec_label = "GUI candidate arena: " + "; ".join(
+            f"{metric['name']} {metric['direction']} {metric['target']} (tol {metric['tol']})"
+            for metric in metrics_snapshot
+        )
+
+        self.arena_status_label.config(text="Verifying candidates in LTspice...", foreground="orange")
+        self.arena_run_btn.config(state="disabled")
+        self.log(f"Candidate Arena started with {len(candidate_snapshot)} candidate(s).")
+
+        def worker():
+            try:
+                repo_root = str(Path(__file__).resolve().parent.parent)
+                if repo_root not in sys.path:
+                    sys.path.insert(0, repo_root)
+                from candidate_arena import CandidateInput, evaluate_candidate_batch, format_candidate_summary
+                from generate_verify import log_verified_pair
+                from sim_harness import Metric, Spec
+
+                spec = Spec(
+                    metrics=[
+                        Metric(
+                            name=metric["name"],
+                            target=metric["target"],
+                            tol=metric["tol"],
+                            direction=metric["direction"],
+                        )
+                        for metric in metrics_snapshot
+                    ],
+                    testbench="",
+                )
+                outcomes = evaluate_candidate_batch(
+                    template_netlist,
+                    [
+                        CandidateInput(label=candidate["label"], text=candidate["text"], source=source)
+                        for candidate in candidate_snapshot
+                    ],
+                    spec,
+                    in_node=in_node,
+                    out_node=out_node,
+                    freq_hz=freq_hz,
+                )
+                for outcome in outcomes:
+                    if outcome.passed:
+                        log_verified_pair(
+                            template_id,
+                            spec_label,
+                            outcome.netlist,
+                            outcome.reports,
+                            attempt=outcome.rank or 1,
+                            source=outcome.source,
+                        )
+                result = {
+                    "outcomes": outcomes,
+                    "summary": format_candidate_summary(outcomes),
+                    "context": {
+                        "template_label": template_label,
+                        "template_netlist": template_netlist,
+                        "spec_label": spec_label,
+                        "metrics": metrics_snapshot,
+                        "in_node": in_node,
+                        "out_node": out_node,
+                        "freq_hz": freq_hz,
+                    },
+                }
+            except Exception as error:
+                logger.error("Candidate Arena failed: %s", error, exc_info=True)
+                result = {"error": str(error)}
+            self.root.after(0, lambda: self._arena_handle_result(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _arena_handle_result(self, result: dict):
+        """Render ranked Candidate Arena outcomes on the main Tk thread."""
+        self.arena_run_btn.config(state="normal" if self.arena_candidates else "disabled")
+        if result.get("error"):
+            self.arena_status_label.config(text="Candidate Arena failed", foreground="red")
+            self.log(f"Candidate Arena ERROR: {result['error']}")
+            messagebox.showerror("Candidate Arena Failed", result["error"])
+            return
+
+        self.arena_outcomes = result["outcomes"]
+        self.arena_context = result["context"]
+        self.arena_outcome_items.clear()
+        for item in self.arena_results_tree.get_children():
+            self.arena_results_tree.delete(item)
+
+        pass_count = 0
+        for outcome in self.arena_outcomes:
+            if outcome.passed:
+                pass_count += 1
+            tag = "pass" if outcome.passed else "rejected" if outcome.status == "REJECTED" else "fail"
+            item = self.arena_results_tree.insert(
+                "",
+                tk.END,
+                text=f"#{outcome.rank} {outcome.label}",
+                values=(
+                    outcome.source,
+                    outcome.status,
+                    f"{outcome.passed_metrics}/{outcome.total_metrics}",
+                    f"{outcome.score:.3f}",
+                    f"{outcome.elapsed_sec:.1f}s",
+                ),
+                tags=(tag,),
+            )
+            self.arena_outcome_items[item] = outcome
+
+        self.arena_status_label.config(
+            text=(
+                f"{pass_count}/{len(self.arena_outcomes)} candidate(s) passed — "
+                "highest ranked candidate is first"
+            ),
+            foreground="green" if pass_count else "red",
+        )
+        self.arena_load_btn.config(state="normal" if self.arena_outcomes else "disabled")
+        self.arena_export_btn.config(state="normal" if self.arena_outcomes else "disabled")
+        self.log(result["summary"])
+
+    def _arena_load_selected(self):
+        """Load the selected candidate into the editor for inspection or export."""
+        selection = self.arena_results_tree.selection()
+        if not selection:
+            messagebox.showwarning("Candidate Arena", "Select a candidate result first.")
+            return
+        outcome = self.arena_outcome_items.get(selection[0])
+        if outcome is None or not outcome.netlist.strip():
+            messagebox.showwarning("Candidate Arena", "The selected result does not contain a usable netlist.")
+            return
+        try:
+            model = parse_netlist(outcome.netlist)
+            model.lines = outcome.netlist.splitlines()
+            self.model = model
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.netlist_path = Path(f"arena_{outcome.label}_{stamp}.cir")
+            self.info_label.config(text=f"Loaded: {self.netlist_path.name} ({outcome.status})")
+            self._populate_ui()
+            self.log(f"Loaded Candidate Arena result: {outcome.label} ({outcome.status}).")
+        except Exception as error:
+            messagebox.showerror("Candidate Arena", f"Could not load selected candidate:\n{error}")
+            self.log(f"Candidate Arena load ERROR: {error}")
+
+    def _arena_export_evidence(self):
+        """Export a self-contained measurement/provenance record for a demo or review."""
+        if not self.arena_outcomes or not self.arena_context:
+            messagebox.showwarning("Candidate Arena", "Run the Candidate Arena before exporting evidence.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Candidate Arena Evidence",
+            defaultextension=".json",
+            filetypes=[("JSON evidence", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            repo_root = str(Path(__file__).resolve().parent.parent)
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            from candidate_arena import write_evidence_bundle
+            from sim_harness import Metric, Spec
+
+            context = self.arena_context
+            spec = Spec(
+                metrics=[
+                    Metric(
+                        name=metric["name"],
+                        target=metric["target"],
+                        tol=metric["tol"],
+                        direction=metric["direction"],
+                    )
+                    for metric in context["metrics"]
+                ],
+                testbench="",
+            )
+            output_path = write_evidence_bundle(
+                path,
+                template_label=context["template_label"],
+                template_netlist=context["template_netlist"],
+                spec_label=context["spec_label"],
+                spec=spec,
+                in_node=context["in_node"],
+                out_node=context["out_node"],
+                freq_hz=context["freq_hz"],
+                outcomes=self.arena_outcomes,
+            )
+            self.log(f"Candidate Arena evidence exported: {output_path}")
+            messagebox.showinfo("Candidate Arena", f"Evidence exported to:\n{output_path}")
+        except Exception as error:
+            messagebox.showerror("Candidate Arena", f"Could not export evidence:\n{error}")
+            self.log(f"Candidate Arena export ERROR: {error}")
 
     def _verify_add_metric(self):
         """Add one target metric row (used to build a sim_harness.Spec)."""

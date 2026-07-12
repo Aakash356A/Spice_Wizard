@@ -1,6 +1,6 @@
 # Verified Test Results — AMD Hackathon Track 3
 
-**Consolidated:** 2026-07-10  
+**Consolidated:** 2026-07-11
 **Environment:** macOS, `/opt/anaconda3/envs/agentcir/bin/python`, local LTspice  
 **Scope:** Tests completed before the local-Gemma and AMD-MI300X work. This record preserves the outcomes that were previously only visible in terminal/session output.
 
@@ -45,6 +45,7 @@
 | C7 | Verified expected failure | Mocked network/API failure returned clean `LLMError`; the generator CLI exited with code 2 rather than showing a `requests` traceback. |
 | C8 | Verified PASS — deterministic retry | A first, slew-limited candidate failed; its measurement feedback was added to the retry prompt, and a corrected candidate passed on the next attempt. |
 | C9 | Verified PASS | Existing verified-pair records parsed successfully as JSONL. |
+| C10 | Verified PASS — Candidate Arena | An unchanged `AD8092` candidate measured **6.014 dB** and passed the 6.0 dB ± 1.0 dB target. Candidates that changed `.tran` to `.op` or rewired `R1` were rejected before LTspice. The JSON evidence schema is also covered by a simulator-free unit test. |
 
 The deterministic C3–C5/C8 tests used real LTspice and mocked only the external LLM call. Their logging function was mocked, so they did not alter the persisted verified-pair dataset.
 
@@ -65,7 +66,7 @@ The GUI tests above used the real widgets, simulation, callback path, and plot r
 
 | # | Result | Evidence / observed outcome |
 |---|---|---|
-| E1 | Blocked | A non-installing requirements preflight failed. `requirements.txt` is a machine-specific environment export, so a true fresh-clone install remains a release blocker. |
+| E1 | Partially remediated | Portable runtime, AMD, and training requirements files replaced the former machine-specific environment export. A true clean-machine clone/install remains unverified. |
 | E2 | Verified PASS | `AD8092` was copied into a temporary directory whose path contained spaces and passed real LTspice verification. |
 | E3 | Verified PASS | A process with dotenv loading disabled and no LLM key returned the clean missing-key `LLMError`; core LTspice verification still passed. |
 | E4 | Partially remediated | The remaining hardcoded OpenRouter fallback was removed, source/notebook scans found no credential literals, and the AMD notebook now requires an authenticated private session token. The historically exposed OpenRouter key still must be revoked by its owner before submission. |
@@ -77,16 +78,17 @@ The GUI tests above used the real widgets, simulation, callback path, and plot r
 ## Not yet verified
 
 - **D4:** a human-visible responsiveness check during a long simulation.
-- **D6:** full local-Gemma agent flow; it is blocked until the missing adapter weights are available.
+- **D6:** full local-Gemma agent flow against the compatible base model on the target machine.
 - **D7 live backend:** combine two circuits through an actual LLM backend rather than the deterministic test double.
-- **E1:** a true fresh-clone install after replacing the machine-specific dependency export with portable project requirements.
+- **E1:** a true fresh-clone install using the portable project requirements.
 - **E4:** revoke the historically exposed OpenRouter key before publishing the repository.
 - **F1–F8:** AMD MI300X/Qwen 7B generation and ROCm evidence.
-- **Gemma loader / D6 prerequisite:** the release repository includes the real LoRA adapter through Git LFS, but the full local-Gemma agent flow remains unverified against the compatible base model on the target machine.
+- **Gemma loader / D6 prerequisite:** the release repository includes the real LoRA adapter through Git LFS, and the loader now resolves its compatible base-model identifier from adapter configuration. The full local-Gemma agent flow remains unverified against the compatible base model on the target machine.
 
 ## Relevant implementation
 
 - [Verifier runner](../sim_harness.py), [waveform measurement](../measure_raw.py), [spec reporting](../spec_report.py), and [CLI](../report_netlist.py)
 - [Template retrieval](../template_index.py), [LLM extraction](../llm_client.py), and [manual AMD candidate verification](../generate_verify.py)
+- [Candidate Arena](../candidate_arena.py) for best-of-N selection and evidence export
 - [GUI Verify Spec integration](../app/gui_main.py)
 - [Local Gemma loader guard](../app/ft_mac.py)

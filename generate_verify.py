@@ -24,9 +24,17 @@ import logging
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 logging.basicConfig(level=logging.WARNING)  # quiet simulation_runner's DEBUG chatter
 
+from candidate_arena import (
+    CandidateInput,
+    evaluate_candidate_batch,
+    format_candidate_summary,
+    validate_template_constraints,
+    write_evidence_bundle,
+)
 from sim_harness import Metric, Spec, run_spice
 from spec_report import report, format_report
 from template_index import find_template
@@ -56,73 +64,12 @@ NEW SPEC:
 {spec_text}
 """
 
-
-def validate_template_constraints(template_netlist: str, candidate_netlist: str) -> list[str]:
-    """Return violations of the netlist lines an adaptation must preserve.
-
-    The generator is allowed to adjust component values, but the model call,
-    library references, and simulation analyses define the known-good circuit
-    and testbench.  Rejecting changes to them prevents a textually plausible
-    response from silently changing topology or the verification conditions.
-    """
-    categories = {
-        "subcircuit call": lambda line: line[:1].lower() == "x",
-        "library directive": lambda line: line.lower().startswith(".lib"),
-        "analysis directive": lambda line: line.lower().startswith((".ac", ".dc", ".op", ".tran")),
-    }
-
-    def protected_lines(netlist: str, predicate) -> list[str]:
-        return [
-            " ".join(line.split())
-            for raw_line in netlist.splitlines()
-            if (line := raw_line.strip()) and not line.startswith("*") and predicate(line)
-        ]
-
-    violations = []
-    for category, predicate in categories.items():
-        if protected_lines(template_netlist, predicate) != protected_lines(candidate_netlist, predicate):
-            violations.append(
-                f"{category} changed; preserve the template's {category} line(s) exactly."
-            )
-    return violations
-
-
 def _constraint_feedback(violations: list[str]) -> str:
     return (
         "\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED BEFORE SIMULATION:\n- "
         + "\n- ".join(violations)
         + "\nOnly change permitted component values and output the complete netlist again."
     )
-
-
-def _failure_feedback(rep) -> str:
-    lines = []
-    for r in rep:
-        if not r.passed:
-            measured = "not measurable" if r.measured != r.measured else f"{r.measured:.3f}"
-            lines.append(f"- {r.name}: target {r.target}, simulation measured {measured}")
-    return (
-        "\n\nYOUR PREVIOUS ATTEMPT WAS SIMULATED AND FAILED THE SPEC:\n"
-        + "\n".join(lines)
-        + "\nAdjust the component values to correct this and output the full netlist again."
-    )
-
-
-def log_verified_pair(ic_name: str, spec_text: str, netlist: str, rep,
-                      attempt: int, path: str = VERIFIED_PAIRS_PATH,
-                      source: str = "llm_api") -> None:
-    record = {
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-        "ic": ic_name,
-        "spec": spec_text,
-        "netlist": netlist,
-        "report": [asdict(r) for r in rep],
-        "attempt": attempt,
-        "source": source,
-    }
-    with open(path, "a") as f:
-        f.write(json.dumps(record) + "\n")
-
 
 def generate_and_verify(
     ic_name: str,
@@ -281,11 +228,18 @@ def main() -> int:
     parser.add_argument("--out-node", default="OUT")
     parser.add_argument("--freq", type=float, default=1000.0, help="Frequency (Hz) for AC gain measurement.")
     parser.add_argument("--timeout", type=int, default=60, help="Per-simulation timeout (s).")
-    parser.add_argument("--save", default="", help="Also write the final netlist to this path.")
+    parser.add_argument("--save", default="", help="Also write the final or best-ranked netlist to this path.")
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument(
         "--candidate", metavar="PATH",
         help="Verify a manually generated Qwen/LLM response stored at PATH; no API call is made.",
+    )
+    source_group.add_argument(
+        "--candidates", nargs="+", metavar="PATH",
+        help=(
+            "Verify and rank multiple model responses. Each candidate is checked against the "
+            "same template and LTspice specification; no API call is made."
+        ),
     )
     source_group.add_argument(
         "--prompt-only", action="store_true",
@@ -293,7 +247,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--source", default="manual_candidate",
-        help="Provenance label written to data/verified_pairs.jsonl when using --candidate.",
+        help="Provenance label written to data/verified_pairs.jsonl for manually supplied candidates.",
+    )
+    parser.add_argument(
+        "--report", default="", metavar="PATH",
+        help="Write a JSON evidence bundle for --candidates to PATH.",
     )
     args = parser.parse_args()
 
@@ -308,11 +266,64 @@ def main() -> int:
         print(build_adapt_prompt(template, args.ic, args.spec))
         return 0
 
+    if args.report and not args.candidates:
+        parser.error("--report is available only with --candidates.")
+
     metrics = [Metric(name=n, target=t, tol=tol, direction="hit_target")
                for n, t, tol in (_parse_metric(m) for m in args.metric)]
 
     try:
-        if args.candidate:
+        if args.candidates:
+            template_path = find_template(args.ic)
+            if template_path is None:
+                raise FileNotFoundError(f"No template netlist found for '{args.ic}' in the corpus.")
+            template = open(template_path, encoding="utf-8", errors="ignore").read()
+            candidates = [
+                CandidateInput(
+                    label=Path(path).stem,
+                    text=Path(path).read_text(encoding="utf-8", errors="ignore"),
+                    source=args.source,
+                )
+                for path in args.candidates
+            ]
+            outcomes = evaluate_candidate_batch(
+                template,
+                candidates,
+                Spec(metrics=metrics, testbench=""),
+                in_node=args.in_node,
+                out_node=args.out_node,
+                freq_hz=args.freq,
+                timeout_s=args.timeout,
+            )
+            print(format_candidate_summary(outcomes))
+            for outcome in outcomes:
+                if outcome.passed:
+                    log_verified_pair(
+                        args.ic,
+                        args.spec,
+                        outcome.netlist,
+                        outcome.reports,
+                        attempt=outcome.rank or 1,
+                        source=outcome.source,
+                    )
+            if args.report:
+                evidence_path = write_evidence_bundle(
+                    args.report,
+                    template_label=str(template_path),
+                    template_netlist=template,
+                    spec_label=args.spec,
+                    spec=Spec(metrics=metrics, testbench=""),
+                    in_node=args.in_node,
+                    out_node=args.out_node,
+                    freq_hz=args.freq,
+                    outcomes=outcomes,
+                )
+                print(f"Evidence bundle written to {evidence_path}")
+            best = outcomes[0] if outcomes else None
+            netlist = best.netlist if best else ""
+            rep = best.reports if best else []
+            passed = any(outcome.passed for outcome in outcomes)
+        elif args.candidate:
             candidate_text = open(args.candidate, encoding="utf-8", errors="ignore").read()
             netlist, rep, passed = verify_candidate(
                 args.ic, args.spec, candidate_text, Spec(metrics=metrics, testbench=""),

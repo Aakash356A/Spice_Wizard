@@ -28,8 +28,17 @@ class LocalGemmaGen:
                 "The local Gemma adapter is unavailable. Run `git lfs pull` in the repository "
                 "and confirm models/gemma3-lora/adapter_model.safetensors is a real binary file."
             )
-            adapter_config = PeftConfig.from_pretrained(str(self.adapter))
-            self.base_id = os.getenv("LOCAL_GEMMA_BASE_MODEL", adapter_config.base_model_name_or_path)
+
+        adapter_config = PeftConfig.from_pretrained(str(self.adapter))
+        self.base_id = (
+            os.getenv("LOCAL_GEMMA_BASE_MODEL", "").strip()
+            or adapter_config.base_model_name_or_path
+        )
+        if not self.base_id:
+            raise ValueError(
+                "The adapter does not declare a base model. Set LOCAL_GEMMA_BASE_MODEL to a "
+                "compatible Gemma model identifier or local path."
+            )
 
         if torch.backends.mps.is_available():
             self.device = "mps"
@@ -48,7 +57,19 @@ class LocalGemmaGen:
     def _load_model(self) -> None:
         print(f"Loading local Gemma base model on {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_id)
-        base = AutoModelForCausalLM.from_pretrained(self.base_id, dtype=self.dtype)
+        load_kwargs = {"torch_dtype": self.dtype}
+        # The released adapter was trained over Unsloth's 4-bit Gemma base.
+        # Prefer its compatible quantized load on CUDA/ROCm, but keep macOS
+        # and CPU environments usable when bitsandbytes is unavailable.
+        if self.device == "cuda" and "bnb-4bit" in self.base_id.lower():
+            try:
+                from transformers import BitsAndBytesConfig
+                import bitsandbytes  # noqa: F401  # Verify the backend is installed.
+
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+            except ImportError:
+                print("bitsandbytes is unavailable; loading the base model without 4-bit quantization.")
+        base = AutoModelForCausalLM.from_pretrained(self.base_id, **load_kwargs)
         base.to(self.device)
         self.model = PeftModel.from_pretrained(base, str(self.adapter)).merge_and_unload()
         self.model.eval()

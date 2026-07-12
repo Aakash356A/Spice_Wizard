@@ -10,7 +10,8 @@ flowchart TD
     Index --> Template[data/templates/*.net]
     Template --> Prompt[generate_verify.py]
     Prompt --> LLM[OpenAI-compatible LLM or manual AMD Qwen]
-    LLM --> Guard[Template invariant guard]
+    LLM --> Arena[candidate_arena.py: Best-of-N]
+    Arena --> Guard[Template invariant guard]
     Guard --> Simulator[sim_harness.py]
     Simulator --> LTspice[LTspice batch run]
     LTspice --> Raw[.raw waveform]
@@ -27,6 +28,7 @@ flowchart TD
 |---|---|
 | `template_index.py` | Finds a canonical template for a requested IC. |
 | `generate_verify.py` | Builds constrained prompts, verifies candidates, applies retry feedback, and writes verified records. |
+| `candidate_arena.py` | Applies one trusted template/spec context to multiple candidates, ranks simulator-backed outcomes, and exports JSON evidence bundles. |
 | `llm_client.py` | Calls a configurable OpenAI-compatible endpoint. |
 | `sim_harness.py` | Provides the common text-netlist-to-`SimResult` interface. |
 | `app/simulation_runner.py` | Locates LTspice and normalizes library paths across platforms. |
@@ -38,11 +40,12 @@ flowchart TD
 
 Before simulation, `validate_template_constraints()` rejects a candidate that changes any of these template invariants:
 
+- element identifiers, order, or node connectivity;
 - subcircuit-call lines;
-- `.lib` directives;
+- `.lib`, `.include`, or `.model` directives;
 - `.ac`, `.dc`, `.op`, or `.tran` analysis directives.
 
-The generator may change component values, not the known-good topology or testbench structure.
+The generator may change R/C/L value tokens and V/I source waveform/value arguments, not the known-good topology or testbench structure.
 
 ## Backends
 
@@ -57,6 +60,11 @@ The verifier runs LTspice locally. It does not require an LLM or a network conne
 ### AMD MI300X manual handoff
 
 The notebook runs Qwen on AMD hardware. The generated text is brought back to the Mac and passed to `generate_verify.py --candidate`, ensuring that the local simulator remains the final authority.
+
+For a best-of-$N$ AMD demonstration, Qwen generates $N$ independent responses
+and `generate_verify.py --candidates ... --report evidence.json` sends each
+through the same local Candidate Arena. The rank is only a selection aid: every
+candidate must still pass the real LTspice specification gate.
 
 ## Optional local Gemma adapter
 

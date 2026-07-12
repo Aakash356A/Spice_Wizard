@@ -5,7 +5,9 @@ import requests
 import difflib
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
-from ft_mac import LocalGemmaGen
+# LocalGemmaGen (the optional fine-tuned specialist) is imported lazily inside
+# UnifiedAgent.__init__ so the chat agent works with just an LLM endpoint
+# (AMD MI300X or OpenRouter) and no local torch model.
 
 load_dotenv()  # loads OPENROUTER_API_KEY (and friends) from a local .env file, if present
 
@@ -17,9 +19,21 @@ OPENROUTER_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 
 class UnifiedAgent:
     def __init__(self):
-        # 1. Initialize the Specialist (Local Fine-Tuned Model)
-        self.specialist = LocalGemmaGen()
-        
+        # 1. Initialize the optional Specialist (local fine-tuned model).
+        # The agent stays fully usable without it: single-IC netlist requests
+        # then fall back to the curated template corpus and the configured LLM
+        # endpoint (see _generate_single_netlist).
+        self.specialist = None
+        self.specialist_error = ""
+        if os.getenv("SPICE_WIZARD_ENABLE_LOCAL_AGENT", "").lower() in {"1", "true", "yes", "on"}:
+            try:
+                from ft_mac import LocalGemmaGen
+                self.specialist = LocalGemmaGen()
+            except Exception as e:
+                self.specialist_error = str(e)
+                print(f"WARNING: local Gemma unavailable ({e}); "
+                      "falling back to template retrieval + LLM endpoint.")
+
         # 2. State memory
         self.last_netlist = None
         self.last_ic = None
@@ -125,7 +139,7 @@ class UnifiedAgent:
         }
                 
         # LOGGING INPUT
-        print(f"\n{'='*20} [UnifiedAgent] REQUEST TO OPENROUTER {'='*20}")
+        print(f"\n{'='*20} [UnifiedAgent] REQUEST TO {OPENROUTER_BASE_URL} {'='*20}")
         print(f"MODEL: {DEFAULT_OPENROUTER_MODEL}")
         print(f"--- SYSTEM PROMPT ---\n{system_prompt}")
         print(f"--- USER PROMPT ---\n{user_prompt}")
@@ -149,8 +163,8 @@ class UnifiedAgent:
             payload["reasoning"] = {"effort": "high"}
 
         try:
-            print(f"DEBUG: Calling OpenRouter with model {DEFAULT_OPENROUTER_MODEL}...")
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
+            print(f"DEBUG: Calling {endpoint} with model {DEFAULT_OPENROUTER_MODEL}...")
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=180)
             resp.raise_for_status()
             data = resp.json()
             
@@ -158,7 +172,7 @@ class UnifiedAgent:
                 content = data["choices"][0]["message"]["content"]
                 
                 # LOGGING OUTPUT
-                print(f"\n{'='*20} [UnifiedAgent] RESPONSE FROM OPENROUTER {'='*20}")
+                print(f"\n{'='*20} [UnifiedAgent] RESPONSE FROM LLM {'='*20}")
                 print(f"{content}")
                 print(f"{'='*60}\n")
                 
@@ -258,10 +272,45 @@ Return a **JSON object** (no markdown) with these fields:
         return plan
 
     def _generate_single_netlist(self, ic_name: str) -> str:
-        """Generate netlist for a single IC using the specialist model."""
+        """Generate a netlist for a single IC.
+
+        Priority: local fine-tuned specialist (opt-in) -> curated application
+        template from data/templates -> the configured LLM endpoint.
+        """
         print(f"\n{'#'*20} [AGENT] Requesting netlist for: {ic_name} {'#'*20}")
-        raw_netlist = self.specialist.generate_netlist(ic_name)
-        return raw_netlist
+        if self.specialist is not None:
+            return self.specialist.generate_netlist(ic_name)
+
+        template = self._load_template_netlist(ic_name)
+        if template:
+            print(f"[AGENT] Serving curated template for {ic_name} "
+                  "(local specialist disabled).")
+            return template
+
+        resp = self._call_general_llm(
+            "You are a SPICE netlist expert. Output ONLY valid SPICE netlist "
+            "text with no markdown or explanations.",
+            f"Write a complete, runnable LTspice example netlist for the "
+            f"{ic_name} in a typical application circuit. Include supplies, a "
+            "test source, an appropriate analysis directive, and .end.",
+            json_mode=False,
+        )
+        if isinstance(resp, dict):
+            raise Exception(resp.get("error", "LLM netlist generation failed"))
+        return resp
+
+    def _load_template_netlist(self, ic_name: str) -> str:
+        """Return the curated application template for ic_name, if present."""
+        templates_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "templates",
+        )
+        for candidate in (f"{ic_name}.net", f"{ic_name.upper()}.net"):
+            path = os.path.join(templates_dir, candidate)
+            if os.path.exists(path):
+                with open(path, "r", errors="replace") as f:
+                    return f.read()
+        return ""
 
     def _combine_netlists_for_subsystem(self, netlists: List[Dict[str, str]], subsystem_description: str, user_query: str) -> str:
         """

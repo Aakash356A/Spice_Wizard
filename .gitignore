@@ -56,3 +56,9 @@ data/**/*.op.raw
 data/**/*.log
 data/**/*.cir
 data/generated/
+
+# Local Candidate Arena inputs and reproducible-but-run-specific evidence.
+# The curated verified_pairs.jsonl remains versioned.
+data/candidate_inputs/
+data/evidence/
+*_candidate_arena.json
